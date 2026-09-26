@@ -1,0 +1,25 @@
+[package]
+name = "chess-video-moves"
+version = "0.1.0"
+edition = "2024"
+description = "Rust port of the chess video move detection pipeline"
+license = "MIT"
+rust-version = "1.88"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+ndarray = "0.17"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic"] }
+shakmaty = "0.30.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[features]
+# GPU execution providers (require a matching ONNX Runtime build at runtime).
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt"]
