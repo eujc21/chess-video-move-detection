@@ -9,6 +9,8 @@
 //! right. [`NaiveTracker`] is a straight port of the Python logic, used as a
 //! fallback when the first observed position is not a legal chess position.
 
+use shakmaty::EnPassantMode;
+use shakmaty::fen::Fen;
 use shakmaty::san::{San, SanPlus};
 use shakmaty::{
     Bitboard, Board, CastlingMode, Chess, Color, FromSetup, Move, Piece, Position, PositionError, Role, Setup, Square,
@@ -55,6 +57,8 @@ pub struct LegalTracker {
     /// Candidate positions; starts with both sides to move and collapses to
     /// one as soon as a move is found.
     candidates: Vec<Chess>,
+    /// Starting position of each candidate (collapses together with `candidates`).
+    starts: Vec<Chess>,
     opts: TrackerOptions,
 }
 
@@ -93,7 +97,7 @@ impl LegalTracker {
         if candidates.is_empty() {
             return None;
         }
-        Some(Self { candidates, opts })
+        Some(Self { starts: candidates.clone(), candidates, opts })
     }
 
     /// Consumes an observation and returns the moves (with their colour)
@@ -119,6 +123,7 @@ impl LegalTracker {
         log::debug!("matched {} ply(ies) with residual {cost}", moves.len());
 
         let mut pos = self.candidates.swap_remove(ci);
+        self.starts = vec![self.starts.swap_remove(ci)];
         let mut out = Vec::new();
         for m in moves {
             let color = pos.turn();
@@ -162,6 +167,16 @@ impl LegalTracker {
             frontier = next;
         }
         best.filter(|(c, _)| *c < stay && *c <= self.opts.max_residual)
+    }
+}
+
+impl LegalTracker {
+    /// FEN of the starting position, once the side to move is known.
+    pub fn start_fen(&self) -> Option<String> {
+        match self.starts.as_slice() {
+            [start] => Some(Fen::from_position(start, EnPassantMode::Legal).to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -239,6 +254,13 @@ impl Tracker {
         Tracker::Naive(NaiveTracker::new(first))
     }
 
+    pub fn start_fen(&self) -> Option<String> {
+        match self {
+            Tracker::Legal(t) => t.start_fen(),
+            Tracker::Naive(_) => None,
+        }
+    }
+
     pub fn update(&mut self, obs: &Occupancy) -> Vec<(String, Color)> {
         match self {
             Tracker::Legal(t) => t.update(obs),
@@ -272,7 +294,6 @@ pub fn format_game(moves: &[String], first_move_black: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shakmaty::fen::Fen;
 
     fn occ(fen: &str) -> Occupancy {
         let setup = fen.parse::<Fen>().unwrap().into_setup();
@@ -310,6 +331,7 @@ mod tests {
         let mut t = LegalTracker::new(&before, opts()).unwrap();
         let after = occ("r4rk1/8/8/8/8/8/8/R3K2R w KQ - 1 2");
         assert_eq!(t.update(&after), vec![("O-O".to_string(), Color::Black)]);
+        assert_eq!(t.start_fen().as_deref(), Some("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1"));
     }
 
     #[test]

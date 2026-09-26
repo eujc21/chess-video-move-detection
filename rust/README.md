@@ -1,13 +1,18 @@
 # chess-video-moves (Rust port)
 
-A Rust port of the Python pipeline in this repository. It reads a video of a chess game and writes the moves in algebraic notation to a CSV file (`row_id,output`), using the same three YOLO models.
+A Rust port of the Python pipeline in this repository, using the same three YOLO models. It has two programs:
+
+- **`chess-video-moves`** (command line) reads video files and writes the moves in algebraic notation to a CSV file (`row_id,output`).
+- **`chess-video-gui`** (desktop app) analyses a live webcam or a video file, with Start/Stop, a preview showing the detected board and pieces, and the move list as PGN.
+
+![Desktop app](docs/gui.png)
 
 ## Requirements
 
 - **Rust** 1.88 or newer.
-- **ffmpeg and ffprobe** on `PATH`. They decode the video.
+- **ffmpeg and ffprobe** on `PATH`. They decode video and capture from cameras.
 - **ONNX Runtime** 1.17 or newer as a shared library. It is loaded at runtime:
-  - Set `ORT_DYLIB_PATH` to point at the library. The `onnxruntime` pip package ships one at `site-packages/onnxruntime/capi/libonnxruntime.so.*`.
+  - Set `ORT_DYLIB_PATH` to point at the library. The `onnxruntime` pip package ships one at `site-packages/onnxruntime/capi/libonnxruntime.so.*` (`.dylib` on macOS).
   - Or put `libonnxruntime.so` / `onnxruntime.dll` on the library path.
 - **ONNX exports of the models.** The `.pt` files can't be loaded outside PyTorch, so export them once:
 
@@ -42,8 +47,48 @@ Useful options (`--help` lists them all):
 | `--check-marks` | off | Append `+` / `#` to moves. |
 | `--naive` | off | Use the original frame-diff move detection instead of legal-move matching. |
 | `--threads` | `0` | ONNX Runtime intra-op threads. `0` means the runtime default. |
+| `--compute-units` | `all` | Apple Silicon only: `all` (GPU + Neural Engine), `gpu` (Metal), `ane` (Neural Engine) or `cpu`. |
 
-Build with `--features cuda` or `--features tensorrt` to use the GPU. This needs a matching ONNX Runtime build.
+On Linux or Windows with an NVIDIA GPU, build with `--features cuda` or `--features tensorrt`. This needs a matching ONNX Runtime build.
+
+## Desktop app (webcam)
+
+```bash
+cargo build --release --features gui --manifest-path rust/Cargo.toml
+rust/target/release/chess-video-gui            # from the repository root
+```
+
+1. Pick a camera (or a video file), resolution and frame rate, then press **Start**.
+2. The first run loads the models, which takes a few seconds.
+3. The preview shows the board outline (red while a hand is over the board), the square grid, and the pieces the model sees (upper-case letters on light discs are white, on dark discs black).
+4. Moves appear on the right. **Copy PGN** and **Save PGN** export the game, with a FEN header if it didn't start from the initial position.
+5. If the board model finds the wrong area, press **Pick corners…** and click the board's four corners on the preview. **Auto-detect board** switches back to the model, for example after moving the camera.
+
+Frames the analysis can't keep up with are dropped, so it stays in step with the camera instead of lagging. Command-line flags: `--device`, `--file`, `--models <folder>`, `--board-corners` and `--start` (begin capturing right away).
+
+Cameras are opened through ffmpeg: AVFoundation on macOS (device `0`, `1`, … or its name), V4L2 on Linux (`/dev/video0`), DirectShow on Windows (the device name).
+
+## Apple Silicon (Metal)
+
+On macOS the build automatically includes ONNX Runtime's CoreML execution provider, so the models run on the GPU (through Metal) and the Neural Engine instead of the CPU:
+
+- **CoreML settings.** Models are compiled in the ML Program format, which runs in FP16 on the GPU / Neural Engine, with static input shapes and the "fast prediction" specialisation.
+- **Compiled-model cache.** Compiled models are cached in `~/Library/Caches/chess-video-moves`, so only the first start is slow. Each model also does one warm-up run at load time.
+- **Compute units.** Use `--compute-units` (or the *Compute* menu in the app) to compare GPU only, Neural Engine only, or both. `all` is usually fastest; if a model runs slower than expected, try `gpu`.
+- **Hardware video decoding.** Video files are decoded with VideoToolbox (`-hwaccel videotoolbox`).
+- **App rendering.** The desktop app draws through wgpu, which uses Metal on macOS.
+
+Setup:
+
+```bash
+brew install ffmpeg onnxruntime
+export ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib
+cargo build --release --features gui --manifest-path rust/Cargo.toml
+```
+
+macOS asks for camera permission the first time. Grant it to your terminal, or to the app you launch the program from.
+
+Once CoreML is in use, you can afford to raise `--hand-checks-per-second` (up to the camera fps) for Python-equivalent hand gating.
 
 ## What changed compared to the Python version
 

@@ -1,19 +1,11 @@
-mod board;
-mod geometry;
-mod notation;
-mod pieces;
-mod pipeline;
-mod video;
-mod yolo;
-
 use anyhow::{Context, Result};
+use chess_video_moves::geometry::Point;
+use chess_video_moves::pipeline::{self, Models, Settings};
+use chess_video_moves::yolo::{ComputeUnits, RuntimeOptions};
+use chess_video_moves::{default_cache_dir, parse_corners};
 use clap::Parser;
-use geometry::Point;
-use pieces::PieceDetector;
-use pipeline::{Models, Settings};
 use std::io::Write;
 use std::path::Path;
-use yolo::Yolo;
 
 /// Extract chess moves from videos of a game.
 #[derive(Parser)]
@@ -63,17 +55,9 @@ struct Args {
     /// ONNX Runtime intra-op threads (0 = default).
     #[arg(long, default_value_t = 0)]
     threads: usize,
-}
-
-fn parse_corners(s: &str) -> Result<[Point; 4], String> {
-    let pts: Vec<Point> = s
-        .split_whitespace()
-        .map(|p| {
-            let (x, y) = p.split_once(',').ok_or("expected x,y")?;
-            Ok(Point::new(x.parse().map_err(|_| "bad x")?, y.parse().map_err(|_| "bad y")?))
-        })
-        .collect::<Result<_, &str>>()?;
-    pts.try_into().map_err(|_| "expected four corners".to_string())
+    /// Apple Silicon: compute units CoreML may use (gpu = Metal).
+    #[arg(long, value_enum, default_value_t = ComputeUnits::All)]
+    compute_units: ComputeUnits,
 }
 
 fn csv_field(s: &str) -> String {
@@ -85,12 +69,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Models are loaded once and shared by all videos.
-    let mut models = Models {
-        board: Yolo::load(&args.board_model, args.threads)?,
-        pieces: PieceDetector::new(Yolo::load(&args.pieces_model, args.threads)?),
-        hands: Yolo::load(&args.hand_model, args.threads)?,
-    };
-    models.hands.conf = args.hand_confidence;
+    let rt =
+        RuntimeOptions { threads: args.threads, compute_units: args.compute_units, cache_dir: default_cache_dir() };
+    let mut models = Models::load(&args.board_model, &args.pieces_model, &args.hand_model, args.hand_confidence, &rt)?;
     let settings = Settings {
         interval_seconds: args.interval,
         hand_min_coverage: args.hand_min_coverage,

@@ -96,20 +96,82 @@ pub struct FrameReader {
     last: u64,
 }
 
+/// Where frames come from.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A video file. `realtime` paces decoding at the video's frame rate (for live-style preview).
+    File { path: String, realtime: bool },
+    /// A capture device: an AVFoundation index or name on macOS, `/dev/videoN`
+    /// on Linux, a DirectShow device name on Windows.
+    Camera { device: String, width: usize, height: usize, fps: f64 },
+}
+
 impl FrameReader {
+    /// Opens a file and decodes only frame 1 and multiples of `interval` or `stride`.
     pub fn open(path: &str, interval: u64, stride: u64) -> Result<Self> {
         let info = probe(path)?;
         let (interval, stride) = (interval.max(1), stride.max(1));
         // 0-based ffmpeg index n corresponds to 1-based frame n + 1.
         let select = format!("select='eq(n\\,0)+not(mod(n+1\\,{interval}))+not(mod(n+1\\,{stride}))'");
+        let mut args = hwaccel_args();
+        args.extend(["-i".into(), path.into(), "-vf".into(), select, "-vsync".into(), "0".into()]);
+        Self::spawn(args, info, interval, stride)
+    }
+
+    /// Opens a file or camera and yields every frame.
+    pub fn open_source(source: &Source) -> Result<Self> {
+        let (mut args, info) = match source {
+            Source::File { path, realtime } => {
+                let mut args = hwaccel_args();
+                if *realtime {
+                    args.push("-re".into());
+                }
+                args.extend(["-i".into(), path.clone()]);
+                (args, probe(path)?)
+            }
+            Source::Camera { device, width, height, fps } => {
+                let size = format!("{width}x{height}");
+                let rate = format!("{fps}");
+                let args: Vec<String> = if cfg!(target_os = "macos") {
+                    vec!["-f", "avfoundation", "-framerate", &rate, "-video_size", &size, "-i", device]
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                } else if cfg!(target_os = "windows") {
+                    let input = format!("video={device}");
+                    vec!["-f", "dshow", "-framerate", &rate, "-video_size", &size, "-i", &input]
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                } else {
+                    vec!["-f", "v4l2", "-framerate", &rate, "-video_size", &size, "-i", device]
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                };
+                (args, VideoInfo { width: *width, height: *height, fps: *fps })
+            }
+        };
+        // Guarantee the frame size we read, whatever the device delivers.
+        args.extend(["-vf".into(), format!("scale={}:{}", info.width, info.height)]);
+        Self::spawn(args, info, 1, 1)
+    }
+
+    fn spawn(input_args: Vec<String>, info: VideoInfo, interval: u64, stride: u64) -> Result<Self> {
         let mut child = Command::new("ffmpeg")
-            .args(["-v", "error", "-nostdin", "-i", path, "-vf", &select, "-vsync", "0"])
+            .args(["-v", "error", "-nostdin"])
+            .args(&input_args)
             .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
             .context("failed to spawn ffmpeg (is it installed and on PATH?)")?;
         let stdout = child.stdout.take().context("ffmpeg stdout unavailable")?;
         Ok(Self { child, stdout, info, interval, stride, last: 0 })
+    }
+
+    pub fn info(&self) -> &VideoInfo {
+        &self.info
     }
 
     pub fn next_frame(&mut self) -> Result<Option<Frame>> {
@@ -130,6 +192,60 @@ impl FrameReader {
         self.last = number;
         Ok(Some(Frame { number, width: w, height: h, rgb }))
     }
+}
+
+/// Hardware video decoding: VideoToolbox (Apple media engine) on macOS.
+fn hwaccel_args() -> Vec<String> {
+    if cfg!(target_os = "macos") { vec!["-hwaccel".into(), "videotoolbox".into()] } else { Vec::new() }
+}
+
+/// Lists capture devices as `(device, label)` pairs using ffmpeg / the OS.
+pub fn list_cameras() -> Vec<(String, String)> {
+    if cfg!(target_os = "linux") {
+        let mut devs: Vec<(String, String)> = std::fs::read_dir("/dev")
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.path().to_string_lossy().into_owned())
+                    .filter(|p| p.starts_with("/dev/video"))
+                    .map(|p| (p.clone(), p))
+                    .collect()
+            })
+            .unwrap_or_default();
+        devs.sort();
+        return devs;
+    }
+    let args: &[&str] = if cfg!(target_os = "macos") {
+        &["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]
+    } else {
+        &["-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
+    };
+    let Ok(out) = Command::new("ffmpeg").args(args).stdin(Stdio::null()).output() else { return Vec::new() };
+    parse_device_list(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// Parses `ffmpeg -list_devices` output (AVFoundation or DirectShow).
+fn parse_device_list(text: &str) -> Vec<(String, String)> {
+    let mut devices = Vec::new();
+    let mut in_video = true;
+    for line in text.lines() {
+        if line.contains("AVFoundation audio devices") {
+            in_video = false;
+        } else if line.contains("AVFoundation video devices") {
+            in_video = true;
+        }
+        let Some(msg) = line.split_once("] ").map(|(_, m)| m.trim()) else { continue };
+        if msg.starts_with('[') && in_video {
+            // AVFoundation: "[0] FaceTime HD Camera"
+            if let Some((idx, name)) = msg[1..].split_once("] ") {
+                devices.push((idx.to_string(), format!("{idx}: {name}")));
+            }
+        } else if msg.starts_with('"') && msg.ends_with("(video)") {
+            // DirectShow: "\"Integrated Camera\" (video)"
+            let name = msg.trim_end_matches("(video)").trim().trim_matches('"').to_string();
+            devices.push((name.clone(), name));
+        }
+    }
+    devices
 }
 
 /// The selected frame number following `last` (0 = before the first frame).
@@ -160,6 +276,23 @@ mod tests {
             v.push(last);
         }
         v
+    }
+
+    #[test]
+    fn parses_device_lists() {
+        let mac = "[AVFoundation indev @ 0x1] AVFoundation video devices:\n[AVFoundation indev @ 0x1] [0] FaceTime HD Camera\n[AVFoundation indev @ 0x1] [1] Capture screen 0\n[AVFoundation indev @ 0x1] AVFoundation audio devices:\n[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone";
+        assert_eq!(
+            super::parse_device_list(mac),
+            vec![
+                ("0".to_string(), "0: FaceTime HD Camera".to_string()),
+                ("1".to_string(), "1: Capture screen 0".to_string())
+            ]
+        );
+        let win = "[dshow @ 0x1] \"Integrated Camera\" (video)\n[dshow @ 0x1]   Alternative name \"@device_pnp\"\n[dshow @ 0x1] \"Microphone\" (audio)";
+        assert_eq!(
+            super::parse_device_list(win),
+            vec![("Integrated Camera".to_string(), "Integrated Camera".to_string())]
+        );
     }
 
     #[test]

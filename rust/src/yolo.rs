@@ -12,6 +12,63 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Tensor;
 
 const MASK_DIM: usize = 32;
+
+/// Which Apple compute units CoreML may use (ignored on other platforms).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ComputeUnits {
+    /// GPU (Metal) + Neural Engine + CPU; CoreML picks per layer.
+    #[default]
+    All,
+    /// GPU (Metal) + CPU.
+    Gpu,
+    /// Neural Engine + CPU.
+    Ane,
+    /// Plain ONNX Runtime CPU kernels, no CoreML.
+    Cpu,
+}
+
+/// How models are executed.
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeOptions {
+    /// ONNX Runtime intra-op threads (0 = default).
+    pub threads: usize,
+    pub compute_units: ComputeUnits,
+    /// Where CoreML keeps compiled models so later starts are fast.
+    pub cache_dir: Option<String>,
+}
+
+impl RuntimeOptions {
+    #[allow(unused_mut)]
+    fn execution_providers(&self) -> Vec<ort::ep::ExecutionProviderDispatch> {
+        let mut eps = Vec::new();
+        #[cfg(feature = "tensorrt")]
+        eps.push(ort::ep::TensorRT::default().build());
+        #[cfg(feature = "cuda")]
+        eps.push(ort::ep::CUDA::default().build());
+        #[cfg(any(feature = "coreml", target_os = "macos"))]
+        if self.compute_units != ComputeUnits::Cpu {
+            use ort::ep::coreml::{ComputeUnits as Units, ModelFormat, SpecializationStrategy};
+            let units = match self.compute_units {
+                ComputeUnits::Gpu => Units::CPUAndGPU,
+                ComputeUnits::Ane => Units::CPUAndNeuralEngine,
+                _ => Units::All,
+            };
+            // MLProgram supports more operators than the legacy NeuralNetwork
+            // format and runs in FP16 on the GPU / Neural Engine.
+            let mut ep = ort::ep::CoreML::default()
+                .with_model_format(ModelFormat::MLProgram)
+                .with_compute_units(units)
+                .with_static_input_shapes(true)
+                .with_specialization_strategy(SpecializationStrategy::FastPrediction)
+                .with_low_precision_accumulation_on_gpu(true);
+            if let Some(dir) = &self.cache_dir {
+                ep = ep.with_model_cache_dir(dir);
+            }
+            eps.push(ep.build());
+        }
+        eps
+    }
+}
 const PAD_VALUE: f32 = 114.0 / 255.0;
 
 #[derive(Debug, Clone)]
@@ -63,13 +120,19 @@ pub struct Yolo {
 }
 
 impl Yolo {
-    pub fn load(path: &str, threads: usize) -> Result<Self> {
+    pub fn load(path: &str, rt: &RuntimeOptions) -> Result<Self> {
         let mut builder = Session::builder()
             .map_err(|e| anyhow!("{e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow!("{e}"))?;
-        if threads > 0 {
-            builder = builder.with_intra_threads(threads).map_err(|e| anyhow!("{e}"))?;
+        if rt.threads > 0 {
+            builder = builder.with_intra_threads(rt.threads).map_err(|e| anyhow!("{e}"))?;
+        }
+        let providers = rt.execution_providers();
+        if !providers.is_empty() {
+            // Providers that are unavailable in the loaded ONNX Runtime are skipped
+            // with a warning, falling back to the CPU.
+            builder = builder.with_execution_providers(providers).map_err(|e| anyhow!("{e}"))?;
         }
         let session = builder
             .commit_from_file(path)
@@ -84,7 +147,13 @@ impl Yolo {
             [_, _, h, w] if *h > 0 && h == w => *h as usize,
             _ => 640,
         };
-        Ok(Self { session, input_size, conf: 0.25, iou: 0.7, max_det: 300 })
+        let mut model = Self { session, input_size, conf: 0.25, iou: 0.7, max_det: 300 };
+        // The first run compiles the graph for the accelerator (seconds with
+        // CoreML); do it now rather than on the first real frame.
+        let blank =
+            Frame { number: 0, width: input_size, height: input_size, rgb: vec![114; input_size * input_size * 3] };
+        model.predict(&blank).with_context(|| format!("warming up {path}"))?;
+        Ok(model)
     }
 
     pub fn predict(&mut self, frame: &Frame) -> Result<Prediction> {
