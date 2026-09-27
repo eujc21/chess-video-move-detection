@@ -53,7 +53,7 @@ jobs:
         with:
           workspaces: rust
       - name: Unit tests and Gherkin scenarios
-        run: cargo test
+        run: cargo test --features gui
       - name: Build CLI and desktop app
         run: cargo build --release --features gui --bins
 

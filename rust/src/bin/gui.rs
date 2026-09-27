@@ -642,3 +642,20 @@ impl Job {
         self.ctx.request_repaint();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use eframe::wgpu::{Backends, Instance};
+
+    /// The app renders through wgpu on macOS; without a native backend compiled in,
+    /// wgpu panics at startup ("No wgpu backend feature ... was enabled").
+    #[test]
+    fn wgpu_has_a_native_backend() {
+        let backends = Instance::enabled_backend_features();
+        if cfg!(target_os = "macos") {
+            assert!(backends.contains(Backends::METAL), "Metal backend missing: {backends:?}");
+        } else {
+            assert!(backends.intersects(Backends::VULKAN | Backends::GL | Backends::DX12), "no backend: {backends:?}");
+        }
+    }
+}

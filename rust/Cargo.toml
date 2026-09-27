@@ -14,9 +14,8 @@ env_logger = "0.11"
 log = "0.4"
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic"] }
 shakmaty = "0.30.0"
-eframe = { version = "0.33", optional = true, default-features = false, features = [
-    "default_fonts", "glow", "wgpu", "wayland", "x11",
-] }
+# Default features keep wgpu's native backends (Metal on macOS, Vulkan/GL elsewhere).
+eframe = { version = "0.33", optional = true, features = ["wgpu"] }
 
 # On macOS always build the CoreML execution provider (Metal GPU + Neural Engine).
 [target.'cfg(target_os = "macos")'.dependencies]
