@@ -140,6 +140,10 @@ src/
 
 **Note**: The `main.py` file and final output files are not shown above but are at the root.
 
+## Rust Port
+
+A faster Rust implementation of the same pipeline lives in [`rust/`](rust/README.md). It runs ONNX exports of the three models with ONNX Runtime and adds legal-move matching, lighter hand gating and a stability filter. See [`rust/README.md`](rust/README.md) for setup and a list of the changes.
+
 ## Configuration
 
 All configuration options, including confidence thresholds, model paths, and frame processing intervals, can be adjusted in `config.py`.
