@@ -1,5 +1,7 @@
 # Chess Move Extraction from Videos Using Deep Learning
 
+[![Rust](https://github.com/eujc21/chess-video-move-detection/actions/workflows/rust.yml/badge.svg)](https://github.com/eujc21/chess-video-move-detection/actions/workflows/rust.yml)
+
 <div align="center">
     <img src="https://github.com/user-attachments/assets/5e4a5970-6017-47c4-b3a5-bc41209ff9c8" 
          alt="Chess board with inference annotations on it" 
@@ -7,6 +9,19 @@
 </div>
 
 This project focuses on automating the transcription of chess piece movements from a video feed. By leveraging image processing, deep learning, and machine learning techniques, it identifies the chessboard, detects individual pieces, and records the sequence of moves in standard chess notation.
+
+## Two ways to run it
+
+| | Python (original) | Rust port ([`rust/`](rust/README.md)) |
+| --- | --- | --- |
+| Input | Video files | Video files, or a live webcam in the desktop app |
+| Output | `result.csv` | `result.csv`, or PGN from the desktop app |
+| Speed | Baseline | About 10× faster on a test video (runs the hand model less often and decodes only the frames it needs) |
+| Move detection | Diffs consecutive frames | Matches legal chess moves, so it handles noise, castling, en passant and promotion |
+| Platforms | Anywhere PyTorch runs | macOS (GPU and Neural Engine via CoreML/Metal), Linux, Windows, FreeBSD (CPU) |
+| Tests | None | Unit tests and Gherkin scenarios, run in CI on every change |
+
+This README covers the Python version. See [`rust/README.md`](rust/README.md) for the Rust command-line tool and the desktop app.
 
 ## Overview
 
@@ -50,7 +65,7 @@ If you want more accurate results, you can retrain these models after your own w
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/oliverfrost1/chess-video-move-detection.git
+   git clone https://github.com/eujc21/chess-video-move-detection.git
    cd chess-video-move-detection
    ```
 2. **Install Dependencies**:  
@@ -64,7 +79,7 @@ If you want more accurate results, you can retrain these models after your own w
 
 3. **Place Models and Input Videos**:
    - Ensure the pretrained models (`board-model.pt`, `pieces-model.pt`, `hand-model.pt`) are in `src/models`. (They should be by default.)
-   - Place your input video in `src/inputs` or use the provided `sample_input_video.mp4` as an example.
+   - Place your input videos in `src/inputs`. No sample video is included, and git ignores that folder, so add your own.
 
 ## Usage
 
@@ -75,10 +90,10 @@ If you want more accurate results, you can retrain these models after your own w
    python main.py
    ```
 
-Remember to input your inputs in `config.py`, otherwise the correct inputs will not be targeted.
+List your videos in `VIDEO_PATHS` in `src/config.py`, otherwise they will not be processed.
 
 2. **Output**:
-   After processing, the moves will be printed out into the `results.csv` file. It will look like this:
+   After processing, the moves are written to `result.csv` in the repository root. It will look like this:
 
    ```csv
    row_id,output
@@ -130,19 +145,26 @@ src/
 ├─ utils.py                # Data structures and utility classes
 ├─ board_processing.py     # Processes the board, finds corners, computes perspective transforms
 ├─ chess_notation.py       # Converts detected moves into standard algebraic chess notation
-├─ inputs/
-│  ├─ sample_input_video.mp4
+├─ inputs/                 # Your input videos (git-ignored)
 └─ models/
    ├─ board-model.pt
    ├─ pieces-model.pt
    └─ hand-model.pt
+rust/                      # Rust port: CLI, desktop app, tests (see rust/README.md)
+.github/workflows/rust.yml # CI for the Rust port: Linux, macOS, Windows, FreeBSD
 ```
 
 **Note**: The `main.py` file and final output files are not shown above but are at the root.
 
 ## Rust Port
 
-A faster Rust implementation of the same pipeline lives in [`rust/`](rust/README.md). It runs ONNX exports of the three models with ONNX Runtime and adds legal-move matching, lighter hand gating and a stability filter. See [`rust/README.md`](rust/README.md) for setup and a list of the changes.
+A faster Rust implementation of the same pipeline lives in [`rust/`](rust/README.md). It runs ONNX exports of the same three models with ONNX Runtime. It adds:
+
+- legal-move matching, lighter hand gating and a stability filter;
+- a desktop app with webcam capture and PGN export;
+- GPU acceleration on Apple Silicon.
+
+See [`rust/README.md`](rust/README.md) for setup on each platform and a full list of the changes.
 
 ## Configuration
 
@@ -153,7 +175,7 @@ All configuration options, including confidence thresholds, model paths, and fra
 - **Lighting and Glare**: Varying lighting conditions can affect detection accuracy.
 - **Camera Angle and Stability**: Extreme angles or a moving camera can make board detection less reliable.
 - **Partial Occlusions**: A hand model is used to filter out frames with disturbances, but if pieces are partially obscured, the move detection might be less accurate.
-- **Rotation Detection**: Rotation detection can fail in instances where there are more white pieces on the wrong side of the board. This could be fixed in the future by using OCR to detect the numbers outside the board.
+- **Rotation Detection**: In the Python version, rotation detection can fail when there are more white pieces on the wrong side of the board. This could be fixed in the future by using OCR to detect the numbers outside the board. The Rust port uses the colours of all empty squares and the average piece positions instead, which is more robust, but it can still be fooled by unusual positions.
 
 ## Datasets for Training
 
@@ -165,4 +187,6 @@ Datasets used for training:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project's code is licensed under the [MIT License](LICENSE).
+
+The models were trained with [Ultralytics YOLO](https://github.com/ultralytics/ultralytics), which is licensed under AGPL-3.0. Check Ultralytics' licensing terms before redistributing the model files or using them in a commercial product.
