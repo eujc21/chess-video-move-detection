@@ -1,5 +1,7 @@
 # chess-video-moves (Rust port)
 
+[![Rust](https://github.com/eujc21/chess-video-move-detection/actions/workflows/rust.yml/badge.svg)](https://github.com/eujc21/chess-video-move-detection/actions/workflows/rust.yml)
+
 A Rust port of the Python pipeline in this repository, using the same three YOLO models. It has two programs:
 
 - **`chess-video-moves`** (command line) reads video files and writes the moves in algebraic notation to a CSV file (`row_id,output`).
