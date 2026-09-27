@@ -1,14 +1,12 @@
-//! Piece detection and assignment of detections to board cells.
+//! Assignment of piece detections to board cells.
 
 use crate::board::{Board, GridPiece};
 use crate::geometry::{Point, rect_overlap_area};
-use crate::video::Frame;
-use crate::yolo::{Detection, Yolo};
-use anyhow::Result;
+use crate::yolo::Detection;
 use shakmaty::{Color, Piece, Role};
 
 /// Class order of the pieces model.
-const CLASSES: [(Color, Role); 12] = [
+pub const CLASSES: [(Color, Role); 12] = [
     (Color::Black, Role::Bishop),
     (Color::Black, Role::King),
     (Color::Black, Role::Knight),
@@ -37,8 +35,19 @@ impl LocatedPiece {
     }
 }
 
-pub struct PieceDetector {
-    model: Yolo,
+/// Piece for a pieces-model class index.
+pub fn piece_for_class(class: usize) -> Option<Piece> {
+    CLASSES.get(class).map(|&(color, role)| Piece { color, role })
+}
+
+/// Pieces-model class index for a piece.
+pub fn class_for_piece(piece: Piece) -> usize {
+    CLASSES.iter().position(|&(c, r)| c == piece.color && r == piece.role).expect("all pieces have a class")
+}
+
+/// Maps piece boxes to board cells, learning the camera's perspective lean.
+#[derive(Debug, Default)]
+pub struct PieceAssigner {
     /// Running sum / count of the perspective offset vectors. The Python code
     /// keeps an ever-growing list and re-averages it each frame (O(n) per
     /// frame); a running mean gives the same value in O(1).
@@ -46,24 +55,14 @@ pub struct PieceDetector {
     offset_count: usize,
 }
 
-impl PieceDetector {
-    pub fn new(model: Yolo) -> Self {
-        Self { model, offset_sum: (0.0, 0.0), offset_count: 0 }
-    }
-
-    pub fn reset(&mut self) {
-        self.offset_sum = (0.0, 0.0);
-        self.offset_count = 0;
-    }
-
-    /// Detects pieces and assigns each to a cell of the unrotated grid.
-    pub fn detect(&mut self, frame: &Frame, board: &Board) -> Result<Vec<LocatedPiece>> {
-        let pred = self.model.predict(frame)?;
+impl PieceAssigner {
+    /// Assigns each detected piece to a cell of the unrotated grid.
+    pub fn assign(&mut self, detections: &[Detection], board: &Board) -> Vec<LocatedPiece> {
         let mut assigned = Vec::new();
-        for det in &pred.detections {
-            let Some(&(color, role)) = CLASSES.get(det.class) else { continue };
+        for det in detections {
+            let Some(piece) = piece_for_class(det.class) else { continue };
             if let Some(cell) = self.max_overlap_cell(board, det) {
-                assigned.push((det, cell, Piece { color, role }));
+                assigned.push((det, cell, piece));
             }
         }
 
@@ -91,7 +90,7 @@ impl PieceDetector {
             };
             pieces.push(LocatedPiece { row, col, piece, conf: det.conf });
         }
-        Ok(pieces)
+        pieces
     }
 
     /// Cell with the largest box overlap. Also records an offset vector from

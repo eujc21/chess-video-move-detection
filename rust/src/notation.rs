@@ -35,7 +35,8 @@ pub fn mismatch(a: &Occupancy, b: &Occupancy) -> f32 {
         .sum()
 }
 
-fn occupancy_of(board: &Board) -> Occupancy {
+/// Occupancy of a board.
+pub fn occupancy_of(board: &Board) -> Occupancy {
     let mut occ = [None; 64];
     for (sq, piece) in board {
         occ[sq as usize] = Some(piece);
@@ -43,6 +44,7 @@ fn occupancy_of(board: &Board) -> Occupancy {
     occ
 }
 
+#[derive(Debug, Clone)]
 pub struct TrackerOptions {
     /// Largest number of plies inferred between two observations.
     pub max_plies: usize,
@@ -53,6 +55,7 @@ pub struct TrackerOptions {
     pub check_marks: bool,
 }
 
+#[derive(Debug)]
 pub struct LegalTracker {
     /// Candidate positions; starts with both sides to move and collapses to
     /// one as soon as a move is found.
@@ -181,7 +184,7 @@ impl LegalTracker {
 }
 
 /// Port of the Python `NotationGenerator`: diffs consecutive observations.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NaiveTracker {
     all_positions: HashSet<Square>,
     previous: Option<Occupancy>,
@@ -238,6 +241,7 @@ impl NaiveTracker {
     }
 }
 
+#[derive(Debug)]
 pub enum Tracker {
     Legal(LegalTracker),
     Naive(NaiveTracker),

@@ -87,8 +87,6 @@ fn main() -> Result<()> {
     let mut out = std::fs::File::create(&args.output).with_context(|| format!("creating {}", args.output))?;
     writeln!(out, "row_id,output")?;
     for video in &args.videos {
-        // The perspective offset is learned per camera, so reset it per video.
-        models.pieces.reset();
         let moves =
             pipeline::process_video(video, &mut models, &settings).with_context(|| format!("processing {video}"))?;
         let name = Path::new(video).file_name().map_or(video.clone(), |n| n.to_string_lossy().into_owned());

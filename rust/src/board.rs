@@ -3,8 +3,7 @@
 
 use crate::geometry::{Homography, Point, polygon_area, rect_overlap_area};
 use crate::video::Frame;
-use crate::yolo::{Detection, Yolo};
-use anyhow::Result;
+use crate::yolo::Detection;
 use shakmaty::{Color, File, Rank, Square};
 
 /// One piece located on the (unrotated) image grid.
@@ -15,6 +14,7 @@ pub struct GridPiece {
     pub color: Color,
 }
 
+#[derive(Debug)]
 pub struct Board {
     /// TL, TR, BR, BL in image pixels.
     pub corners: [Point; 4],
@@ -44,16 +44,6 @@ impl Board {
         }
         let area = polygon_area(&corners);
         Some(Self { corners, area, to_grid, from_grid, cells, rotation: None })
-    }
-
-    /// Runs the board segmentation model and builds the board from the
-    /// highest-confidence mask (or its box for a plain detection model).
-    pub fn detect(model: &mut Yolo, frame: &Frame) -> Result<Option<Self>> {
-        let pred = model.predict(frame)?;
-        let Some(det) = pred.detections.first() else { return Ok(None) };
-        let corners = pred.mask_corners(det, frame.width, frame.height).unwrap_or_else(|| det.corners());
-        log::info!("Detected board corners (TL, TR, BR, BL): {corners:?}");
-        Ok(Self::from_corners(corners))
     }
 
     /// Grid cell `(row, col)` containing an image point, if on the board.

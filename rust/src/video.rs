@@ -224,7 +224,7 @@ pub fn list_cameras() -> Vec<(String, String)> {
 }
 
 /// Parses `ffmpeg -list_devices` output (AVFoundation or DirectShow).
-fn parse_device_list(text: &str) -> Vec<(String, String)> {
+pub fn parse_device_list(text: &str) -> Vec<(String, String)> {
     let mut devices = Vec::new();
     let mut in_video = true;
     for line in text.lines() {
@@ -249,7 +249,7 @@ fn parse_device_list(text: &str) -> Vec<(String, String)> {
 }
 
 /// The selected frame number following `last` (0 = before the first frame).
-fn next_selected(last: u64, interval: u64, stride: u64) -> u64 {
+pub fn next_selected(last: u64, interval: u64, stride: u64) -> u64 {
     if last == 0 {
         return 1;
     }

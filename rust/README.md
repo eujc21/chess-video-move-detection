@@ -118,5 +118,21 @@ Once CoreML is in use, you can afford to raise `--hand-checks-per-second` (up to
 ## Tests
 
 ```bash
-cargo test --manifest-path rust/Cargo.toml
+cargo test --manifest-path rust/Cargo.toml              # unit tests + BDD scenarios
+cargo test --manifest-path rust/Cargo.toml --test bdd   # BDD scenarios only
+cargo test --manifest-path rust/Cargo.toml --test bdd -- --name "hand"   # filter by scenario name
 ```
+
+Behaviour is specified in Gherkin under [`tests/features`](tests/features) and run with [cucumber-rs](https://crates.io/crates/cucumber). The step definitions are in `tests/bdd/`.
+
+| Feature | Covers |
+| --- | --- |
+| `move_tracking.feature` | Legal-move matching: noise, missed and misclassified pieces, two moves at once, castling, en passant, promotion, disambiguation, black moving first, the fallback for impossible positions. |
+| `live_session.feature` | A full session frame by frame: sampling, skipping frames near a hand, the stability filter, moves made under a hand, a board that appears late, every camera rotation, games starting mid-way. |
+| `board_orientation.feature` | Square naming for each rotation, rotation detection from an image, locating points on the board. |
+| `piece_assignment.feature` | Box-to-square assignment and the learned perspective lean. |
+| `game_notation.feature` | Move numbering. |
+| `frame_selection.feature` | Which frames are decoded. |
+| `camera_devices.feature` | Parsing ffmpeg's camera lists. |
+
+The session scenarios don't need the models. They drive a real `Session` with a scripted camera that implements the same `Vision` trait as the YOLO models (`tests/bdd/camera.rs`). It renders a top-down board and reports pieces, hands and the board from a timeline.

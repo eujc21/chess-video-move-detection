@@ -563,7 +563,6 @@ impl Job {
         };
         let (key, mut models) = models?;
         models.hands.conf = self.hand_confidence;
-        models.pieces.reset();
         if let Err(e) = self.analyse(&mut models) {
             self.fail(format!("{e:#}"));
         }

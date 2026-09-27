@@ -4,9 +4,9 @@
 use crate::board::Board;
 use crate::geometry::Point;
 use crate::notation::{Occupancy, Tracker, TrackerOptions, format_game, mismatch};
-use crate::pieces::{LocatedPiece, PieceDetector};
+use crate::pieces::{LocatedPiece, PieceAssigner};
 use crate::video::{Frame, FrameReader};
-use crate::yolo::{RuntimeOptions, Yolo};
+use crate::yolo::{Detection, RuntimeOptions, Yolo};
 use anyhow::Result;
 use shakmaty::{Color, Piece};
 use std::collections::VecDeque;
@@ -44,20 +44,46 @@ impl Default for Settings {
     }
 }
 
+/// The detectors a [`Session`] needs. [`Models`] implements it with the
+/// YOLO models; tests use scripted fakes.
+pub trait Vision {
+    /// Board corners (TL, TR, BR, BL) in image pixels, if a board is visible.
+    fn find_board(&mut self, frame: &Frame) -> Result<Option<[Point; 4]>>;
+    /// Hand boxes in image pixels.
+    fn detect_hands(&mut self, frame: &Frame) -> Result<Vec<Detection>>;
+    /// Piece boxes in image pixels, with pieces-model class indices.
+    fn detect_pieces(&mut self, frame: &Frame) -> Result<Vec<Detection>>;
+}
+
 pub struct Models {
     pub board: Yolo,
-    pub pieces: PieceDetector,
+    pub pieces: Yolo,
     pub hands: Yolo,
+}
+
+impl Vision for Models {
+    fn find_board(&mut self, frame: &Frame) -> Result<Option<[Point; 4]>> {
+        let pred = self.board.predict(frame)?;
+        let Some(det) = pred.detections.first() else { return Ok(None) };
+        let corners = pred.mask_corners(det, frame.width, frame.height).unwrap_or_else(|| det.corners());
+        log::info!("Detected board corners (TL, TR, BR, BL): {corners:?}");
+        Ok(Some(corners))
+    }
+
+    fn detect_hands(&mut self, frame: &Frame) -> Result<Vec<Detection>> {
+        Ok(self.hands.predict(frame)?.detections)
+    }
+
+    fn detect_pieces(&mut self, frame: &Frame) -> Result<Vec<Detection>> {
+        Ok(self.pieces.predict(frame)?.detections)
+    }
 }
 
 impl Models {
     /// Loads the three ONNX models; `hand_confidence` is the hand model's threshold.
     pub fn load(board: &str, pieces: &str, hands: &str, hand_confidence: f32, rt: &RuntimeOptions) -> Result<Self> {
-        let mut models = Self {
-            board: Yolo::load(board, rt)?,
-            pieces: PieceDetector::new(Yolo::load(pieces, rt)?),
-            hands: Yolo::load(hands, rt)?,
-        };
+        let mut models =
+            Self { board: Yolo::load(board, rt)?, pieces: Yolo::load(pieces, rt)?, hands: Yolo::load(hands, rt)? };
         models.hands.conf = hand_confidence;
         Ok(models)
     }
@@ -100,6 +126,10 @@ pub struct Session {
     last_observation: Option<Occupancy>,
     hand_now: bool,
     status: String,
+    /// Learned per camera, so it lives with the session.
+    assigner: PieceAssigner,
+    /// Frame numbers of the samples that were analysed.
+    analysed: Vec<u64>,
 }
 
 impl Session {
@@ -123,6 +153,8 @@ impl Session {
             last_observation: None,
             hand_now: false,
             status: "Waiting for frames".into(),
+            assigner: PieceAssigner::default(),
+            analysed: Vec::new(),
         }
     }
 
@@ -147,7 +179,7 @@ impl Session {
         self.recalibrate();
     }
 
-    pub fn push(&mut self, frame: Frame, models: &mut Models) -> Result<()> {
+    pub fn push<V: Vision + ?Sized>(&mut self, frame: Frame, models: &mut V) -> Result<()> {
         let n = frame.number;
         if !self.wants(n) {
             return Ok(());
@@ -158,7 +190,7 @@ impl Session {
             if !is_sample {
                 return Ok(());
             }
-            self.board = Board::detect(&mut models.board, &frame)?;
+            self.board = models.find_board(&frame)?.and_then(Board::from_corners);
             if self.board.is_none() {
                 log::warn!("No chess board detected in frame {n}");
                 self.status = "No chess board detected".into();
@@ -167,7 +199,8 @@ impl Session {
         }
 
         let board = self.board.as_ref().expect("board detected above");
-        self.hand_now = detect_hand(&mut models.hands, board, &frame, &self.settings)?;
+        let min_coverage = self.settings.hand_min_coverage;
+        self.hand_now = models.detect_hands(&frame)?.iter().any(|d| board.coverage(d) >= min_coverage);
         let window = self.window;
         if self.hand_now {
             log::info!(
@@ -197,11 +230,16 @@ impl Session {
     }
 
     /// Processes samples still waiting for their look-ahead window.
-    pub fn finish(&mut self, models: &mut Models) -> Result<()> {
+    pub fn finish<V: Vision + ?Sized>(&mut self, models: &mut V) -> Result<()> {
         while let Some(p) = self.pending.pop_front() {
             self.process_sample(&p, models)?;
         }
         Ok(())
+    }
+
+    /// Frame numbers of the samples analysed so far (not skipped for a hand).
+    pub fn analysed_frames(&self) -> &[u64] {
+        &self.analysed
     }
 
     pub fn notation(&self) -> String {
@@ -244,11 +282,12 @@ impl Session {
         view
     }
 
-    fn process_sample(&mut self, frame: &Frame, models: &mut Models) -> Result<()> {
+    fn process_sample<V: Vision + ?Sized>(&mut self, frame: &Frame, models: &mut V) -> Result<()> {
         log::info!("Processing frame {}", frame.number);
+        self.analysed.push(frame.number);
         let s = &self.settings;
         let Some(board) = self.board.as_mut() else { return Ok(()) };
-        let pieces = models.pieces.detect(frame, board)?;
+        let pieces = self.assigner.assign(&models.detect_pieces(frame)?, board);
         if board.rotation.is_none() {
             // The rotation only changes the cell -> square mapping, so the same
             // detections are reused (the Python code runs the model twice).
@@ -302,11 +341,6 @@ impl Session {
 /// Whether frame `n` (1-based) is a sample or a hand-check frame.
 pub fn wants_frame(n: u64, interval: u64, stride: u64) -> bool {
     n == 1 || n.is_multiple_of(interval) || n.is_multiple_of(stride)
-}
-
-fn detect_hand(model: &mut Yolo, board: &Board, frame: &Frame, s: &Settings) -> Result<bool> {
-    let pred = model.predict(frame)?;
-    Ok(pred.detections.iter().any(|d| board.coverage(d) >= s.hand_min_coverage))
 }
 
 /// Processes a whole video file and returns its moves.

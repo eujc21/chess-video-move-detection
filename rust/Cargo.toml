@@ -39,3 +39,12 @@ required-features = ["gui"]
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[dev-dependencies]
+cucumber = "0.23"
+futures = "0.3"
+
+# Gherkin (Cucumber) behaviour tests in tests/features; run with `cargo test --test bdd`.
+[[test]]
+name = "bdd"
+harness = false
