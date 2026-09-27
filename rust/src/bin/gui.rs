@@ -12,7 +12,7 @@ use chess_video_moves::pipeline::{Models, Session, Settings, View, wants_frame};
 use chess_video_moves::video::{Frame, FrameReader, Source, list_cameras};
 use chess_video_moves::yolo::{ComputeUnits, RuntimeOptions};
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -53,6 +53,9 @@ enum RendererChoice {
 
 /// Frames the smoke test renders before closing the window.
 const SMOKE_TEST_FRAMES: u32 = 10;
+/// Frames actually rendered and the graphics backend used, reported by `--smoke-test`.
+static SMOKE_RENDERED: AtomicU32 = AtomicU32::new(0);
+static SMOKE_BACKEND: Mutex<String> = Mutex::new(String::new());
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -67,7 +70,8 @@ fn main() -> eframe::Result {
         app.file = file;
     }
     let autostart = args.start;
-    if args.smoke_test {
+    let smoke_test = args.smoke_test;
+    if smoke_test {
         app.smoke_frames_left = Some(SMOKE_TEST_FRAMES);
         // Never let a hung window stall CI.
         std::thread::spawn(|| {
@@ -88,7 +92,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1360.0, 820.0]).with_title("Chess Video Moves"),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Chess Video Moves",
         options,
         Box::new(move |cc| {
@@ -97,7 +101,34 @@ fn main() -> eframe::Result {
             }
             Ok(Box::new(app))
         }),
-    )
+    );
+    if smoke_test {
+        // Verify rendering really happened rather than trusting the exit path.
+        let rendered = SMOKE_RENDERED.load(Ordering::Relaxed);
+        let backend = SMOKE_BACKEND.lock().unwrap().clone();
+        if result.is_ok() && rendered >= SMOKE_TEST_FRAMES {
+            println!("smoke test passed: rendered {rendered} frames on {backend}");
+        } else {
+            eprintln!("smoke test failed: rendered {rendered}/{SMOKE_TEST_FRAMES} frames on {backend:?}: {result:?}");
+            std::process::exit(1);
+        }
+    }
+    result
+}
+
+/// Describes the graphics backend and adapter that is rendering the window.
+fn describe_backend(frame: &eframe::Frame) -> String {
+    if let Some(render_state) = frame.wgpu_render_state() {
+        let info = render_state.adapter.get_info();
+        return format!("wgpu {:?}: {}", info.backend, info.name);
+    }
+    if let Some(gl) = frame.gl() {
+        use eframe::glow::HasContext;
+        // SAFETY: reads a string from the live OpenGL context eframe created.
+        let renderer = unsafe { gl.get_parameter_string(eframe::glow::RENDERER) };
+        return format!("OpenGL: {renderer}");
+    }
+    "unknown backend".into()
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -509,7 +540,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.reap();
         egui::SidePanel::left("controls").resizable(false).exact_width(300.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, ctx));
@@ -521,6 +552,9 @@ impl eframe::App for App {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
         if let Some(left) = &mut self.smoke_frames_left {
+            if SMOKE_RENDERED.fetch_add(1, Ordering::Relaxed) == 0 {
+                *SMOKE_BACKEND.lock().unwrap() = describe_backend(frame);
+            }
             if *left == 0 {
                 log::info!("smoke test: rendered {SMOKE_TEST_FRAMES} frames, closing");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
