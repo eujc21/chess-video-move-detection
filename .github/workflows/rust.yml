@@ -56,6 +56,25 @@ jobs:
         run: cargo test --features gui
       - name: Build CLI and desktop app
         run: cargo build --release --features gui --bins
+      # Open the real window, render a few frames and exit. Catches start-up
+      # crashes (e.g. a missing graphics backend) that building alone cannot.
+      - name: Smoke test desktop app (Linux, OpenGL and Vulkan)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q xvfb mesa-vulkan-drivers libxkbcommon-x11-0
+          xvfb-run -a ./target/release/chess-video-gui --smoke-test --renderer glow
+          xvfb-run -a ./target/release/chess-video-gui --smoke-test --renderer wgpu
+      - name: Smoke test desktop app (macOS, Metal)
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: ./target/release/chess-video-gui --smoke-test --renderer auto
+      - name: Smoke test desktop app (Windows, DirectX 12)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: bash
+        run: ./target/release/chess-video-gui.exe --smoke-test --renderer wgpu
 
   msrv:
     name: Minimum Rust version (1.88)
@@ -69,14 +88,18 @@ jobs:
       - run: cargo check --all-targets --features gui
 
   freebsd:
-    name: FreeBSD (cross-check)
+    name: FreeBSD (VM)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # Runs a real FreeBSD virtual machine, so the tests execute on FreeBSD
+      # rather than only being type-checked for it.
+      - uses: vmactions/freebsd-vm@v1
         with:
-          targets: x86_64-unknown-freebsd
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-      - run: cargo check --target x86_64-unknown-freebsd --all-targets --features gui
+          usesh: true
+          prepare: pkg install -y rust
+          run: |
+            cd rust
+            rustc --version
+            cargo test --features gui

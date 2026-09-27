@@ -36,7 +36,23 @@ struct Args {
     /// Start capturing immediately.
     #[arg(long)]
     start: bool,
+    /// Graphics backend: wgpu (Metal/Vulkan/DX12) or glow (OpenGL). `auto` uses wgpu on macOS, glow elsewhere.
+    #[arg(long, value_enum, default_value_t = RendererChoice::Auto)]
+    renderer: RendererChoice,
+    /// Open the window, render a few frames and exit 0 (used by CI to check the app starts).
+    #[arg(long)]
+    smoke_test: bool,
 }
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RendererChoice {
+    Auto,
+    Glow,
+    Wgpu,
+}
+
+/// Frames the smoke test renders before closing the window.
+const SMOKE_TEST_FRAMES: u32 = 10;
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -51,9 +67,24 @@ fn main() -> eframe::Result {
         app.file = file;
     }
     let autostart = args.start;
-    let options = eframe::NativeOptions {
+    if args.smoke_test {
+        app.smoke_frames_left = Some(SMOKE_TEST_FRAMES);
+        // Never let a hung window stall CI.
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(120));
+            eprintln!("smoke test: window did not finish rendering within 120 s");
+            std::process::exit(2);
+        });
+    }
+    let renderer = match args.renderer {
+        RendererChoice::Glow => eframe::Renderer::Glow,
+        RendererChoice::Wgpu => eframe::Renderer::Wgpu,
         // wgpu renders through Metal on macOS; glow (OpenGL) is the most portable elsewhere.
-        renderer: if cfg!(target_os = "macos") { eframe::Renderer::Wgpu } else { eframe::Renderer::Glow },
+        RendererChoice::Auto if cfg!(target_os = "macos") => eframe::Renderer::Wgpu,
+        RendererChoice::Auto => eframe::Renderer::Glow,
+    };
+    let options = eframe::NativeOptions {
+        renderer,
         viewport: egui::ViewportBuilder::default().with_inner_size([1360.0, 820.0]).with_title("Chess Video Moves"),
         ..Default::default()
     };
@@ -126,6 +157,8 @@ struct App {
     texture: Option<TextureHandle>,
     started: Option<Instant>,
     message: String,
+    /// `--smoke-test`: frames left to render before closing the window.
+    smoke_frames_left: Option<u32>,
     /// Corners clicked so far while picking the board manually.
     picking: Option<Vec<Point>>,
 }
@@ -160,6 +193,7 @@ impl Default for App {
             started: None,
             message: String::new(),
             picking: None,
+            smoke_frames_left: None,
         }
     }
 }
@@ -485,6 +519,15 @@ impl eframe::App for App {
         if self.running() {
             // Capture threads request repaints on new frames; this keeps stats ticking.
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if let Some(left) = &mut self.smoke_frames_left {
+            if *left == 0 {
+                log::info!("smoke test: rendered {SMOKE_TEST_FRAMES} frames, closing");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                *left -= 1;
+                ctx.request_repaint();
+            }
         }
     }
 

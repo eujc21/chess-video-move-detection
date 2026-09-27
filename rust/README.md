@@ -66,7 +66,11 @@ rust/target/release/chess-video-gui            # from the repository root
 4. Moves appear on the right. **Copy PGN** and **Save PGN** export the game, with a FEN header if it didn't start from the initial position.
 5. If the board model finds the wrong area, press **Pick corners…** and click the board's four corners on the preview. **Auto-detect board** switches back to the model, for example after moving the camera.
 
-Frames the analysis can't keep up with are dropped, so it stays in step with the camera instead of lagging. Command-line flags: `--device`, `--file`, `--models <folder>`, `--board-corners` and `--start` (begin capturing right away).
+Frames the analysis can't keep up with are dropped, so it stays in step with the camera instead of lagging. Command-line flags:
+
+- `--device`, `--file`, `--models <folder>` and `--board-corners` pre-fill the settings; `--start` begins capturing right away.
+- `--renderer auto|glow|wgpu` picks the graphics backend. `auto` uses wgpu (Metal) on macOS and glow (OpenGL) elsewhere. Try the other one if the window fails to open.
+- `--smoke-test` opens the window, renders a few frames and exits. CI runs it on Linux, macOS and Windows to catch start-up crashes.
 
 Cameras are opened through ffmpeg: AVFoundation on macOS (device `0`, `1`, … or its name), V4L2 on Linux (`/dev/video0`), DirectShow on Windows (the device name).
 
