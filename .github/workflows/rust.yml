@@ -67,3 +67,16 @@ jobs:
         with:
           workspaces: rust
       - run: cargo check --all-targets --features gui
+
+  freebsd:
+    name: FreeBSD (cross-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-freebsd
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo check --target x86_64-unknown-freebsd --all-targets --features gui

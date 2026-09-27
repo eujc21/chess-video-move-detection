@@ -92,6 +92,22 @@ macOS asks for camera permission the first time. Grant it to your terminal, or t
 
 Once CoreML is in use, you can afford to raise `--hand-checks-per-second` (up to the camera fps) for Python-equivalent hand gating.
 
+## FreeBSD
+
+The CLI and the desktop app build for FreeBSD, and CI type-checks that build on every change. Nobody has run them on a FreeBSD machine yet. Inference runs on the CPU there, because ONNX Runtime has no GPU backend for FreeBSD.
+
+```sh
+pkg install rust ffmpeg onnxruntime webcamd
+sysrc webcamd_enable=YES && service webcamd start   # USB webcams appear as /dev/video0, ...
+pw groupmod webcamd -m $USER                        # allow your user to open the camera
+export ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+cargo build --release --features gui --manifest-path rust/Cargo.toml
+```
+
+- **Camera support:** cameras are opened through ffmpeg's V4L2 input, which `webcamd` provides. Check that your ffmpeg includes it with `ffmpeg -hide_banner -devices | grep v4l2`.
+- **Missing package:** if your FreeBSD release has no `onnxruntime` package, build ONNX Runtime from source.
+- **Model export:** export the ONNX models on another machine (for example your Mac) and copy them over. Exporting needs Python and PyTorch.
+
 ## What changed compared to the Python version
 
 **Speed**

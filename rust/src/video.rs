@@ -201,7 +201,8 @@ fn hwaccel_args() -> Vec<String> {
 
 /// Lists capture devices as `(device, label)` pairs using ffmpeg / the OS.
 pub fn list_cameras() -> Vec<(String, String)> {
-    if cfg!(target_os = "linux") {
+    // Linux, FreeBSD (webcamd) and other Unixes expose V4L2 devices as /dev/videoN.
+    if !cfg!(any(target_os = "macos", target_os = "windows")) {
         let mut devs: Vec<(String, String)> = std::fs::read_dir("/dev")
             .map(|d| {
                 d.flatten()
