@@ -48,5 +48,13 @@ pub struct ChessWorld {
 }
 
 fn main() {
-    futures::executor::block_on(ChessWorld::cucumber().fail_on_skipped().run_and_exit("tests/features"));
+    // cucumber's runner needs more stack than Windows gives the main thread
+    // (1 MB) in unoptimised builds, so run it on a thread with an explicit stack.
+    std::thread::Builder::new()
+        .name("cucumber".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| futures::executor::block_on(ChessWorld::cucumber().fail_on_skipped().run_and_exit("tests/features")))
+        .expect("spawn cucumber thread")
+        .join()
+        .expect("cucumber thread panicked");
 }

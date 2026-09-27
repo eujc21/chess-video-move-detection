@@ -445,7 +445,7 @@ impl App {
             }
         }
 
-        let grid = Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 200, 255, 140));
+        let grid = Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(80, 200, 255, 140));
         for (quad, piece) in &view.cells {
             let pts = quad.map(to_screen);
             painter.line_segment([pts[0], pts[1]], grid);
@@ -469,7 +469,7 @@ impl App {
         if let Some(corners) = view.board_corners {
             let pts: Vec<Pos2> = corners.iter().map(|p| to_screen(*p)).collect();
             let color = if view.hand { Color32::from_rgb(230, 80, 60) } else { Color32::from_rgb(60, 220, 90) };
-            painter.add(egui::Shape::closed_line(pts, Stroke::new(3.0, color)));
+            painter.add(egui::Shape::closed_line(pts, Stroke::new(3.0_f32, color)));
         }
     }
 }
