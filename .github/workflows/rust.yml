@@ -167,7 +167,7 @@ jobs:
       - uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y rust ffmpeg onnxruntime xorg-vfbserver mesa-dri
+          prepare: pkg install -y rust ffmpeg onnxruntime xorg-vfbserver mesa-dri mesa-libs libX11 libXcursor libXrandr libXi libxkbcommon
           run: |
             set -e
             cd rust

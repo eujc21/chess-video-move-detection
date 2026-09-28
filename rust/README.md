@@ -102,6 +102,7 @@ CI runs the tests, the CLI with the real models and the desktop app in a FreeBSD
 
 ```sh
 pkg install rust ffmpeg onnxruntime webcamd
+pkg install libXcursor libXrandr libXi libxkbcommon   # X11 libraries the desktop app loads at startup
 sysrc webcamd_enable=YES && service webcamd start   # USB webcams appear as /dev/video0, ...
 pw groupmod webcamd -m $USER                        # allow your user to open the camera
 cargo build --release --features gui --manifest-path rust/Cargo.toml
