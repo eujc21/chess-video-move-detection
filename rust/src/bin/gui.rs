@@ -12,7 +12,7 @@ use chess_video_moves::pipeline::{Models, Session, Settings, View, wants_frame};
 use chess_video_moves::video::{Frame, FrameReader, Source, list_cameras};
 use chess_video_moves::yolo::{ComputeUnits, RuntimeOptions};
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, Stroke, TextureHandle, TextureOptions, Vec2};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -36,9 +36,33 @@ struct Args {
     /// Start capturing immediately.
     #[arg(long)]
     start: bool,
+    /// Graphics backend: wgpu (Metal/Vulkan/DX12) or glow (OpenGL). `auto` uses wgpu on macOS, glow elsewhere.
+    #[arg(long, value_enum, default_value_t = RendererChoice::Auto)]
+    renderer: RendererChoice,
+    /// Open the window, render a few frames and exit 0 (used by CI to check the app starts).
+    /// With `--start`, also wait until the models have analysed a few frames.
+    #[arg(long)]
+    smoke_test: bool,
 }
 
-fn main() -> eframe::Result {
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RendererChoice {
+    Auto,
+    Glow,
+    Wgpu,
+}
+
+/// Frames the smoke test renders before closing the window.
+const SMOKE_TEST_FRAMES: u32 = 10;
+/// Frames actually rendered and the graphics backend used, reported by `--smoke-test`.
+static SMOKE_RENDERED: AtomicU32 = AtomicU32::new(0);
+static SMOKE_BACKEND: Mutex<String> = Mutex::new(String::new());
+/// With `--smoke-test --start`: frames the models must analyse before closing.
+const SMOKE_TEST_ANALYSED: u64 = 3;
+/// With `--smoke-test --start`: how the analysis ended (frames analysed, or the error).
+static SMOKE_ANALYSIS: Mutex<Option<Result<u64, String>>> = Mutex::new(None);
+
+fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = <Args as clap::Parser>::parse();
     let mut app = App { model_dir: args.models, ..App::default() };
@@ -51,13 +75,32 @@ fn main() -> eframe::Result {
         app.file = file;
     }
     let autostart = args.start;
-    let options = eframe::NativeOptions {
+    let smoke_test = args.smoke_test;
+    if smoke_test {
+        app.smoke_frames_left = Some(SMOKE_TEST_FRAMES);
+        app.smoke_analysis = autostart;
+        // Never let a hung window stall CI. Loading the models (and CoreML's first
+        // compile) can take a while, so allow more time when analysing.
+        let limit = if autostart { 600 } else { 120 };
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(limit));
+            eprintln!("smoke test: window did not finish within {limit} s");
+            chess_video_moves::exit_process(2);
+        });
+    }
+    let renderer = match args.renderer {
+        RendererChoice::Glow => eframe::Renderer::Glow,
+        RendererChoice::Wgpu => eframe::Renderer::Wgpu,
         // wgpu renders through Metal on macOS; glow (OpenGL) is the most portable elsewhere.
-        renderer: if cfg!(target_os = "macos") { eframe::Renderer::Wgpu } else { eframe::Renderer::Glow },
+        RendererChoice::Auto if cfg!(target_os = "macos") => eframe::Renderer::Wgpu,
+        RendererChoice::Auto => eframe::Renderer::Glow,
+    };
+    let options = eframe::NativeOptions {
+        renderer,
         viewport: egui::ViewportBuilder::default().with_inner_size([1360.0, 820.0]).with_title("Chess Video Moves"),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Chess Video Moves",
         options,
         Box::new(move |cc| {
@@ -66,7 +109,47 @@ fn main() -> eframe::Result {
             }
             Ok(Box::new(app))
         }),
-    )
+    );
+    if smoke_test {
+        // Verify rendering really happened rather than trusting the exit path.
+        let rendered = SMOKE_RENDERED.load(Ordering::Relaxed);
+        let backend = SMOKE_BACKEND.lock().unwrap().clone();
+        let analysis = SMOKE_ANALYSIS.lock().unwrap().clone();
+        let analysis_ok = !autostart || matches!(analysis, Some(Ok(_)));
+        if result.is_ok() && rendered >= SMOKE_TEST_FRAMES && analysis_ok {
+            match analysis {
+                Some(Ok(n)) => println!(
+                    "smoke test passed: rendered {rendered} frames on {backend}; analysed {n} frames with the models"
+                ),
+                _ => println!("smoke test passed: rendered {rendered} frames on {backend}"),
+            }
+        } else if let Some(Err(e)) = analysis {
+            eprintln!("smoke test failed: analysis stopped with an error: {e}");
+            chess_video_moves::exit_process(1);
+        } else {
+            eprintln!("smoke test failed: rendered {rendered}/{SMOKE_TEST_FRAMES} frames on {backend:?}: {result:?}");
+            chess_video_moves::exit_process(1);
+        }
+    }
+    if let Err(e) = &result {
+        eprintln!("Error: {e:?}");
+    }
+    chess_video_moves::exit_process(if result.is_ok() { 0 } else { 1 })
+}
+
+/// Describes the graphics backend and adapter that is rendering the window.
+fn describe_backend(frame: &eframe::Frame) -> String {
+    if let Some(render_state) = frame.wgpu_render_state() {
+        let info = render_state.adapter.get_info();
+        return format!("wgpu {:?}: {}", info.backend, info.name);
+    }
+    if let Some(gl) = frame.gl() {
+        use eframe::glow::HasContext;
+        // SAFETY: reads a string from the live OpenGL context eframe created.
+        let renderer = unsafe { gl.get_parameter_string(eframe::glow::RENDERER) };
+        return format!("OpenGL: {renderer}");
+    }
+    "unknown backend".into()
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -126,6 +209,10 @@ struct App {
     texture: Option<TextureHandle>,
     started: Option<Instant>,
     message: String,
+    /// `--smoke-test`: frames left to render before closing the window.
+    smoke_frames_left: Option<u32>,
+    /// `--smoke-test --start`: also wait for the models to analyse frames.
+    smoke_analysis: bool,
     /// Corners clicked so far while picking the board manually.
     picking: Option<Vec<Point>>,
 }
@@ -160,6 +247,8 @@ impl Default for App {
             started: None,
             message: String::new(),
             picking: None,
+            smoke_frames_left: None,
+            smoke_analysis: false,
         }
     }
 }
@@ -475,7 +564,7 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.reap();
         egui::SidePanel::left("controls").resizable(false).exact_width(300.0).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.controls(ui, ctx));
@@ -485,6 +574,32 @@ impl eframe::App for App {
         if self.running() {
             // Capture threads request repaints on new frames; this keeps stats ticking.
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+        if let Some(left) = &mut self.smoke_frames_left {
+            if SMOKE_RENDERED.fetch_add(1, Ordering::Relaxed) == 0 {
+                *SMOKE_BACKEND.lock().unwrap() = describe_backend(frame);
+            }
+            if *left == 0 {
+                if self.smoke_analysis {
+                    let analysed = self.frames_analysed.load(Ordering::Relaxed);
+                    let error = self.shared.lock().unwrap().error.clone();
+                    let outcome = match error {
+                        Some(e) => Some(Err(e)),
+                        None if analysed >= SMOKE_TEST_ANALYSED => Some(Ok(analysed)),
+                        None => None,
+                    };
+                    if outcome.is_none() {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                        return;
+                    }
+                    *SMOKE_ANALYSIS.lock().unwrap() = outcome;
+                }
+                log::info!("smoke test: done, closing");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                *left -= 1;
+                ctx.request_repaint();
+            }
         }
     }
 
@@ -640,5 +755,22 @@ impl Job {
         log::error!("{error}");
         self.shared.lock().unwrap().error = Some(error);
         self.ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use eframe::wgpu::{Backends, Instance};
+
+    /// The app renders through wgpu on macOS; without a native backend compiled in,
+    /// wgpu panics at startup ("No wgpu backend feature ... was enabled").
+    #[test]
+    fn wgpu_has_a_native_backend() {
+        let backends = Instance::enabled_backend_features();
+        if cfg!(target_os = "macos") {
+            assert!(backends.contains(Backends::METAL), "Metal backend missing: {backends:?}");
+        } else {
+            assert!(backends.intersects(Backends::VULKAN | Backends::GL | Backends::DX12), "no backend: {backends:?}");
+        }
     }
 }
