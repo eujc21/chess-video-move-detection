@@ -40,6 +40,7 @@ struct Args {
     #[arg(long, value_enum, default_value_t = RendererChoice::Auto)]
     renderer: RendererChoice,
     /// Open the window, render a few frames and exit 0 (used by CI to check the app starts).
+    /// With `--start`, also wait until the models have analysed a few frames.
     #[arg(long)]
     smoke_test: bool,
 }
@@ -56,6 +57,10 @@ const SMOKE_TEST_FRAMES: u32 = 10;
 /// Frames actually rendered and the graphics backend used, reported by `--smoke-test`.
 static SMOKE_RENDERED: AtomicU32 = AtomicU32::new(0);
 static SMOKE_BACKEND: Mutex<String> = Mutex::new(String::new());
+/// With `--smoke-test --start`: frames the models must analyse before closing.
+const SMOKE_TEST_ANALYSED: u64 = 3;
+/// With `--smoke-test --start`: how the analysis ended (frames analysed, or the error).
+static SMOKE_ANALYSIS: Mutex<Option<Result<u64, String>>> = Mutex::new(None);
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -73,10 +78,13 @@ fn main() -> eframe::Result {
     let smoke_test = args.smoke_test;
     if smoke_test {
         app.smoke_frames_left = Some(SMOKE_TEST_FRAMES);
-        // Never let a hung window stall CI.
-        std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_secs(120));
-            eprintln!("smoke test: window did not finish rendering within 120 s");
+        app.smoke_analysis = autostart;
+        // Never let a hung window stall CI. Loading the models (and CoreML's first
+        // compile) can take a while, so allow more time when analysing.
+        let limit = if autostart { 600 } else { 120 };
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(limit));
+            eprintln!("smoke test: window did not finish within {limit} s");
             std::process::exit(2);
         });
     }
@@ -106,8 +114,18 @@ fn main() -> eframe::Result {
         // Verify rendering really happened rather than trusting the exit path.
         let rendered = SMOKE_RENDERED.load(Ordering::Relaxed);
         let backend = SMOKE_BACKEND.lock().unwrap().clone();
-        if result.is_ok() && rendered >= SMOKE_TEST_FRAMES {
-            println!("smoke test passed: rendered {rendered} frames on {backend}");
+        let analysis = SMOKE_ANALYSIS.lock().unwrap().clone();
+        let analysis_ok = !autostart || matches!(analysis, Some(Ok(_)));
+        if result.is_ok() && rendered >= SMOKE_TEST_FRAMES && analysis_ok {
+            match analysis {
+                Some(Ok(n)) => println!(
+                    "smoke test passed: rendered {rendered} frames on {backend}; analysed {n} frames with the models"
+                ),
+                _ => println!("smoke test passed: rendered {rendered} frames on {backend}"),
+            }
+        } else if let Some(Err(e)) = analysis {
+            eprintln!("smoke test failed: analysis stopped with an error: {e}");
+            std::process::exit(1);
         } else {
             eprintln!("smoke test failed: rendered {rendered}/{SMOKE_TEST_FRAMES} frames on {backend:?}: {result:?}");
             std::process::exit(1);
@@ -190,6 +208,8 @@ struct App {
     message: String,
     /// `--smoke-test`: frames left to render before closing the window.
     smoke_frames_left: Option<u32>,
+    /// `--smoke-test --start`: also wait for the models to analyse frames.
+    smoke_analysis: bool,
     /// Corners clicked so far while picking the board manually.
     picking: Option<Vec<Point>>,
 }
@@ -225,6 +245,7 @@ impl Default for App {
             message: String::new(),
             picking: None,
             smoke_frames_left: None,
+            smoke_analysis: false,
         }
     }
 }
@@ -556,7 +577,21 @@ impl eframe::App for App {
                 *SMOKE_BACKEND.lock().unwrap() = describe_backend(frame);
             }
             if *left == 0 {
-                log::info!("smoke test: rendered {SMOKE_TEST_FRAMES} frames, closing");
+                if self.smoke_analysis {
+                    let analysed = self.frames_analysed.load(Ordering::Relaxed);
+                    let error = self.shared.lock().unwrap().error.clone();
+                    let outcome = match error {
+                        Some(e) => Some(Err(e)),
+                        None if analysed >= SMOKE_TEST_ANALYSED => Some(Ok(analysed)),
+                        None => None,
+                    };
+                    if outcome.is_none() {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                        return;
+                    }
+                    *SMOKE_ANALYSIS.lock().unwrap() = outcome;
+                }
+                log::info!("smoke test: done, closing");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else {
                 *left -= 1;

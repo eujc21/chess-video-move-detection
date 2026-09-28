@@ -13,26 +13,25 @@ A Rust port of the Python pipeline in this repository, using the same three YOLO
 
 - **Rust** 1.88 or newer.
 - **ffmpeg and ffprobe** on `PATH`. They decode video and capture from cameras.
-- **ONNX Runtime** 1.17 or newer as a shared library. It is loaded at runtime:
-  - Set `ORT_DYLIB_PATH` to point at the library. The `onnxruntime` pip package ships one at `site-packages/onnxruntime/capi/libonnxruntime.so.*` (`.dylib` on macOS).
-  - Or put `libonnxruntime.so` / `onnxruntime.dll` on the library path.
-- **ONNX exports of the models.** The `.pt` files can't be loaded outside PyTorch, so export them once:
+- **ONNX exports of the models, and ONNX Runtime.** The repository ships the models as PyTorch `.pt` files, which only PyTorch can load. Run this once (it needs Python 3):
 
   ```bash
-  pip install ultralytics==8.3.31 onnx onnxscript
-  for m in board pieces hand; do
-    yolo export model=src/models/$m-model.pt format=onnx imgsz=640
-  done   # writes src/models/*-model.onnx
+  rust/scripts/export-models.sh   # writes src/models/*-model.onnx
   ```
+
+  The script installs its tools into `.venv` at the repository root, including ONNX Runtime. The programs find ONNX Runtime there on their own.
+
+  ONNX Runtime must be version 1.17 or newer. The programs also look in the Homebrew and `/usr/local` locations and on the library path. To use a specific copy, set `ORT_DYLIB_PATH` to the library file.
+- **Working directory.** The model paths default to `src/models/...`. They work from the repository root, from `rust/`, or wherever the binary is, as long as it is inside the repository.
 
 ## Usage
 
 From the repository root:
 
 ```bash
+rust/scripts/export-models.sh      # once
 cargo build --release --manifest-path rust/Cargo.toml
-ORT_DYLIB_PATH=/path/to/libonnxruntime.so \
-  rust/target/release/chess-video-moves src/inputs/*.mp4 -o result.csv
+rust/target/release/chess-video-moves src/inputs/*.mp4 -o result.csv
 ```
 
 Useful options (`--help` lists them all):
@@ -70,7 +69,7 @@ Frames the analysis can't keep up with are dropped, so it stays in step with the
 
 - `--device`, `--file`, `--models <folder>` and `--board-corners` pre-fill the settings; `--start` begins capturing right away.
 - `--renderer auto|glow|wgpu` picks the graphics backend. `auto` uses wgpu (Metal) on macOS and glow (OpenGL) elsewhere. Try the other one if the window fails to open.
-- `--smoke-test` opens the window, renders a few frames and exits. CI runs it on Linux, macOS and Windows to catch start-up crashes.
+- `--smoke-test` opens the window, renders a few frames and exits. With `--start --file <video>` it also waits until the models have analysed a few frames, and fails if loading the models or the runtime fails.
 
 Cameras are opened through ffmpeg: AVFoundation on macOS (device `0`, `1`, … or its name), V4L2 on Linux (`/dev/video0`), DirectShow on Windows (the device name).
 
@@ -87,9 +86,10 @@ On macOS the build automatically includes ONNX Runtime's CoreML execution provid
 Setup:
 
 ```bash
-brew install ffmpeg onnxruntime
-export ORT_DYLIB_PATH=$(brew --prefix onnxruntime)/lib/libonnxruntime.dylib
+brew install ffmpeg
+rust/scripts/export-models.sh   # models + ONNX Runtime (with CoreML) in .venv
 cargo build --release --features gui --manifest-path rust/Cargo.toml
+rust/target/release/chess-video-gui
 ```
 
 macOS asks for camera permission the first time. Grant it to your terminal, or to the app you launch the program from.
@@ -98,19 +98,18 @@ Once CoreML is in use, you can afford to raise `--hand-checks-per-second` (up to
 
 ## FreeBSD
 
-The CLI and the desktop app build for FreeBSD, and CI type-checks that build on every change. Nobody has run them on a FreeBSD machine yet. Inference runs on the CPU there, because ONNX Runtime has no GPU backend for FreeBSD.
+CI runs the tests, the CLI with the real models and the desktop app in a FreeBSD virtual machine on every change. Nobody has tried it on FreeBSD hardware with a real webcam yet. Inference runs on the CPU, because ONNX Runtime has no GPU backend for FreeBSD.
 
 ```sh
 pkg install rust ffmpeg onnxruntime webcamd
 sysrc webcamd_enable=YES && service webcamd start   # USB webcams appear as /dev/video0, ...
 pw groupmod webcamd -m $USER                        # allow your user to open the camera
-export ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 cargo build --release --features gui --manifest-path rust/Cargo.toml
 ```
 
 - **Camera support:** cameras are opened through ffmpeg's V4L2 input, which `webcamd` provides. Check that your ffmpeg includes it with `ffmpeg -hide_banner -devices | grep v4l2`.
 - **Missing package:** if your FreeBSD release has no `onnxruntime` package, build ONNX Runtime from source.
-- **Model export:** export the ONNX models on another machine (for example your Mac) and copy them over. Exporting needs Python and PyTorch.
+- **Model export:** PyTorch doesn't run on FreeBSD, so run `rust/scripts/export-models.sh` on another machine (for example your Mac) and copy `src/models/*.onnx` over. ONNX Runtime comes from `pkg` and is found in `/usr/local/lib` automatically.
 
 ## What changed compared to the Python version
 
@@ -156,5 +155,18 @@ Behaviour is specified in Gherkin under [`tests/features`](tests/features) and r
 | `game_notation.feature` | Move numbering. |
 | `frame_selection.feature` | Which frames are decoded. |
 | `camera_devices.feature` | Parsing ffmpeg's camera lists. |
+
+### Continuous integration
+
+Every change runs these checks ([`.github/workflows/rust.yml`](../.github/workflows/rust.yml)):
+
+| Check | Linux | macOS (Apple Silicon) | Windows | FreeBSD (VM) |
+| --- | --- | --- | --- | --- |
+| Unit tests and Gherkin scenarios | yes | yes | yes | yes |
+| Window opens and renders (`--smoke-test`) | OpenGL and Vulkan | Metal | DirectX 12 | OpenGL |
+| Models exported with `export-models.sh` | yes | yes | no | reuses the Linux export |
+| CLI and app analyse a video with the models | yes | yes (CoreML) | no | yes |
+
+Formatting, clippy and the minimum Rust version (1.88) are checked too.
 
 The session scenarios don't need the models. They drive a real `Session` with a scripted camera that implements the same `Vision` trait as the YOLO models (`tests/bdd/camera.rs`). It renders a top-down board and reports pieces, hands and the board from a timeline.

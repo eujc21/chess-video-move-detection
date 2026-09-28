@@ -3,9 +3,9 @@ name: Rust
 on:
   push:
     branches: [main]
-    paths: ["rust/**", ".github/workflows/rust.yml"]
+    paths: ["rust/**", "src/models/**", ".github/workflows/rust.yml"]
   pull_request:
-    paths: ["rust/**", ".github/workflows/rust.yml"]
+    paths: ["rust/**", "src/models/**", ".github/workflows/rust.yml"]
   workflow_dispatch:
 
 permissions:
@@ -76,6 +76,68 @@ jobs:
         shell: bash
         run: ./target/release/chess-video-gui.exe --smoke-test --renderer wgpu
 
+  # Runs the real models end to end, the way a user would: export the .pt files
+  # with the script from the README, let the programs find ONNX Runtime on their
+  # own (no ORT_DYLIB_PATH), then analyse a generated video with the CLI and the
+  # desktop app. Catches missing models, export problems and runtime-loading
+  # failures that the unit tests and the window-only smoke test can't.
+  e2e:
+    name: End-to-end with models (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install ffmpeg (and a virtual display on Linux)
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            brew install ffmpeg
+          else
+            sudo apt-get update -q
+            sudo apt-get install -y -q ffmpeg xvfb libxkbcommon-x11-0
+          fi
+      - name: Cache exported models
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: src/models/*.onnx
+          key: onnx-${{ hashFiles('src/models/*.pt', 'rust/scripts/export-models.sh') }}
+      - name: Export models to ONNX (the README's setup step)
+        if: steps.models.outputs.cache-hit != 'true'
+        run: rust/scripts/export-models.sh
+      - name: Install ONNX Runtime where the export script puts it
+        if: steps.models.outputs.cache-hit == 'true'
+        run: python -m venv .venv && .venv/bin/pip install --quiet onnxruntime
+      - name: Build
+        run: cargo build --release --features gui --bins --manifest-path rust/Cargo.toml
+      - name: Make a test video
+        run: ffmpeg -v error -f lavfi -i testsrc=size=640x480:rate=10 -t 10 -pix_fmt yuv420p test.mp4
+      - name: CLI analyses the video
+        env:
+          RUST_LOG: info
+        run: |
+          rust/target/release/chess-video-moves test.mp4 -o result.csv
+          cat result.csv
+          grep -q '^test.mp4,' result.csv
+      - name: Desktop app analyses the video
+        timeout-minutes: 15
+        run: |
+          app="rust/target/release/chess-video-gui --smoke-test --start --file test.mp4"
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a $app; else $app; fi
+
   msrv:
     name: Minimum Rust version (1.88)
     runs-on: ubuntu-latest
@@ -89,17 +151,36 @@ jobs:
 
   freebsd:
     name: FreeBSD (VM)
+    # Reuses the ONNX models the Linux e2e job exported (PyTorch doesn't run on FreeBSD).
+    needs: e2e
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
-      # Runs a real FreeBSD virtual machine, so the tests execute on FreeBSD
-      # rather than only being type-checked for it.
+      - uses: actions/cache/restore@v4
+        with:
+          path: src/models/*.onnx
+          key: onnx-${{ hashFiles('src/models/*.pt', 'rust/scripts/export-models.sh') }}
+          fail-on-cache-miss: true
+      # Runs a real FreeBSD virtual machine, so the tests, the models and the
+      # desktop app run on FreeBSD rather than only being type-checked for it.
       - uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y rust
+          prepare: pkg install -y rust ffmpeg onnxruntime xorg-vfbserver mesa-dri
           run: |
+            set -e
             cd rust
             rustc --version
             cargo test --features gui
+            cargo build --release --features gui --bins
+            cd ..
+            ffmpeg -v error -f lavfi -i testsrc=size=640x480:rate=10 -t 10 -pix_fmt yuv420p test.mp4
+            RUST_LOG=info rust/target/release/chess-video-moves test.mp4 -o result.csv
+            cat result.csv
+            grep -q '^test.mp4,' result.csv
+            Xvfb :99 -screen 0 1400x900x24 &
+            sleep 3
+            export DISPLAY=:99
+            rust/target/release/chess-video-gui --smoke-test --renderer glow
+            rust/target/release/chess-video-gui --smoke-test --renderer glow --start --file test.mp4

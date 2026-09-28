@@ -111,6 +111,82 @@ pub struct Prediction {
     input_size: usize,
 }
 
+/// Loads the ONNX Runtime shared library once, returning an error instead of
+/// the panic (and, inside ONNX Runtime callbacks, abort) that `ort` produces
+/// when it can't find the library on first use.
+///
+/// Uses `ORT_DYLIB_PATH` when set; otherwise tries the usual install locations
+/// (Homebrew, /usr/local, the system search path, and an `onnxruntime` pip
+/// package in a virtual environment above the working directory or the
+/// executable, such as the one `scripts/export-models.sh` creates).
+pub fn load_runtime() -> Result<()> {
+    static LOADED: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+    LOADED.get_or_init(try_load_runtime).clone().map_err(|e| anyhow!(e))
+}
+
+fn try_load_runtime() -> std::result::Result<(), String> {
+    let candidates = match std::env::var("ORT_DYLIB_PATH") {
+        Ok(p) if !p.is_empty() => vec![std::path::PathBuf::from(p)],
+        _ => runtime_candidates(),
+    };
+    let mut errors = Vec::new();
+    for path in &candidates {
+        match ort::init_from(path) {
+            Ok(env) => {
+                env.commit();
+                log::info!("using ONNX Runtime from {}", path.display());
+                return Ok(());
+            }
+            Err(e) => errors.push(format!("  {}: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "could not load ONNX Runtime (1.17 or newer). Install it (macOS: `brew install onnxruntime`; \
+         FreeBSD: `pkg install onnxruntime`; or `pip install onnxruntime`) and, if it still isn't found, \
+         set ORT_DYLIB_PATH to the library. Tried:\n{}",
+        errors.join("\n")
+    ))
+}
+
+fn runtime_candidates() -> Vec<std::path::PathBuf> {
+    let name = if cfg!(target_os = "windows") {
+        "onnxruntime.dll"
+    } else if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    };
+    let mut paths: Vec<std::path::PathBuf> = ["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"]
+        .iter()
+        .filter(|_| !cfg!(target_os = "windows"))
+        .map(|d| std::path::Path::new(d).join(name))
+        .collect();
+    // pip's onnxruntime wheel ships the library with a version suffix.
+    let cwd = std::env::current_dir().ok();
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf()));
+    for start in [cwd, exe_dir].into_iter().flatten() {
+        for dir in start.ancestors() {
+            for venv in [".venv", ".ort", "venv"] {
+                let Ok(libs) = std::fs::read_dir(dir.join(venv).join("lib")) else { continue };
+                for py in libs.flatten() {
+                    let capi = py.path().join("site-packages/onnxruntime/capi");
+                    let Ok(files) = std::fs::read_dir(&capi) else { continue };
+                    paths.extend(
+                        files.flatten().map(|f| f.path()).filter(|f| {
+                            f.file_name().is_some_and(|n| n.to_string_lossy().starts_with("libonnxruntime."))
+                        }),
+                    );
+                }
+            }
+        }
+    }
+    paths.retain(|p| p.exists());
+    // Bare name last: the dynamic loader's own search path.
+    paths.push(name.into());
+    paths.dedup();
+    paths
+}
+
 pub struct Yolo {
     session: Session,
     input_size: usize,
@@ -121,6 +197,14 @@ pub struct Yolo {
 
 impl Yolo {
     pub fn load(path: &str, rt: &RuntimeOptions) -> Result<Self> {
+        load_runtime()?;
+        let path = &crate::resolve_model_path(path);
+        if !std::path::Path::new(path).exists() {
+            bail!(
+                "model {path} not found. The repository ships PyTorch (.pt) models; export them to ONNX once \
+                 by running `rust/scripts/export-models.sh` (needs Python 3)"
+            );
+        }
         let mut builder = Session::builder()
             .map_err(|e| anyhow!("{e}"))?
             .with_optimization_level(GraphOptimizationLevel::Level3)

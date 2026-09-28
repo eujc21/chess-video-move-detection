@@ -1,1 +1,4 @@
 .venv
+.ort/
+src/models/*.onnx
+src/models/*.onnx.data
