@@ -2,3 +2,6 @@
 .ort/
 src/models/*.onnx
 src/models/*.onnx.data
+datasets/
+runs/
+src/models/chessred/

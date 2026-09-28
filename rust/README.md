@@ -73,6 +73,8 @@ Frames the analysis can't keep up with are dropped, so it stays in step with the
 
 Cameras are opened through ffmpeg: AVFoundation on macOS (device `0`, `1`, … or its name), V4L2 on Linux (`/dev/video0`), DirectShow on Windows (the device name).
 
+To improve detection from side and low angles, fine-tune the models on the ChessReD dataset; see [`training/README.md`](../training/README.md).
+
 ## Apple Silicon (Metal)
 
 On macOS the build automatically includes ONNX Runtime's CoreML execution provider, so the models run on the GPU (through Metal) and the Neural Engine instead of the CPU:
