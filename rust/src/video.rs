@@ -114,7 +114,8 @@ impl FrameReader {
         // 0-based ffmpeg index n corresponds to 1-based frame n + 1.
         let select = format!("select='eq(n\\,0)+not(mod(n+1\\,{interval}))+not(mod(n+1\\,{stride}))'");
         let mut args = hwaccel_args();
-        args.extend(["-i".into(), path.into(), "-vf".into(), select, "-vsync".into(), "0".into()]);
+        args.extend(["-i".into(), path.into(), "-vf".into(), select]);
+        args.extend(passthrough_args().map(String::from));
         Self::spawn(args, info, interval, stride)
     }
 
@@ -181,6 +182,10 @@ impl FrameReader {
         while filled < rgb.len() {
             let n = self.stdout.read(&mut rgb[filled..])?;
             if n == 0 {
+                let status = self.child.wait()?;
+                if !status.success() {
+                    bail!("ffmpeg failed ({status}); see its message above");
+                }
                 if filled != 0 {
                     log::warn!("truncated trailing frame ignored");
                 }
@@ -192,6 +197,28 @@ impl FrameReader {
         self.last = number;
         Ok(Some(Frame { number, width: w, height: h, rgb }))
     }
+}
+
+/// Keeps every selected frame exactly once (no duplicates to fill gaps). ffmpeg
+/// 5.1 replaced `-vsync` with `-fps_mode`, and ffmpeg 8 removed `-vsync`.
+fn passthrough_args() -> [&'static str; 2] {
+    static MODERN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let modern = *MODERN.get_or_init(|| {
+        let out = Command::new("ffmpeg").arg("-version").stdin(Stdio::null()).output();
+        let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        ffmpeg_version(&text).is_none_or(|v| v >= (5, 1))
+    });
+    if modern { ["-fps_mode", "passthrough"] } else { ["-vsync", "0"] }
+}
+
+/// Parses `(major, minor)` from `ffmpeg -version` output, e.g. "ffmpeg version 6.1.1-3ubuntu5"
+/// or "ffmpeg version n7.1". Git builds ("N-12345-g…") have no version and return `None`.
+pub fn ffmpeg_version(text: &str) -> Option<(u32, u32)> {
+    let version = text.split_whitespace().nth(2)?.trim_start_matches('n');
+    let mut parts = version.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().and_then(|m| m.parse().ok()).unwrap_or(0);
+    Some((major, minor))
 }
 
 /// Hardware video decoding: VideoToolbox (Apple media engine) on macOS.
@@ -294,6 +321,16 @@ mod tests {
             super::parse_device_list(win),
             vec![("Integrated Camera".to_string(), "Integrated Camera".to_string())]
         );
+    }
+
+    #[test]
+    fn parses_ffmpeg_versions() {
+        use super::ffmpeg_version;
+        assert_eq!(ffmpeg_version("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023"), Some((6, 1)));
+        assert_eq!(ffmpeg_version("ffmpeg version n7.1 Copyright"), Some((7, 1)));
+        assert_eq!(ffmpeg_version("ffmpeg version 8.0 Copyright"), Some((8, 0)));
+        assert_eq!(ffmpeg_version("ffmpeg version 4.4.2-0ubuntu0.22.04.1"), Some((4, 4)));
+        assert_eq!(ffmpeg_version("ffmpeg version N-118000-gabcdef"), None);
     }
 
     #[test]

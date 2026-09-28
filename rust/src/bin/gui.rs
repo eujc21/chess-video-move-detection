@@ -62,7 +62,7 @@ const SMOKE_TEST_ANALYSED: u64 = 3;
 /// With `--smoke-test --start`: how the analysis ended (frames analysed, or the error).
 static SMOKE_ANALYSIS: Mutex<Option<Result<u64, String>>> = Mutex::new(None);
 
-fn main() -> eframe::Result {
+fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = <Args as clap::Parser>::parse();
     let mut app = App { model_dir: args.models, ..App::default() };
@@ -85,7 +85,7 @@ fn main() -> eframe::Result {
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(limit));
             eprintln!("smoke test: window did not finish within {limit} s");
-            std::process::exit(2);
+            chess_video_moves::exit_process(2);
         });
     }
     let renderer = match args.renderer {
@@ -125,13 +125,16 @@ fn main() -> eframe::Result {
             }
         } else if let Some(Err(e)) = analysis {
             eprintln!("smoke test failed: analysis stopped with an error: {e}");
-            std::process::exit(1);
+            chess_video_moves::exit_process(1);
         } else {
             eprintln!("smoke test failed: rendered {rendered}/{SMOKE_TEST_FRAMES} frames on {backend:?}: {result:?}");
-            std::process::exit(1);
+            chess_video_moves::exit_process(1);
         }
     }
-    result
+    if let Err(e) = &result {
+        eprintln!("Error: {e:?}");
+    }
+    chess_video_moves::exit_process(if result.is_ok() { 0 } else { 1 })
 }
 
 /// Describes the graphics backend and adapter that is rendering the window.
