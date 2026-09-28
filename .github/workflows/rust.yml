@@ -179,8 +179,12 @@ jobs:
             RUST_LOG=info rust/target/release/chess-video-moves test.mp4 -o result.csv
             cat result.csv
             grep -q '^test.mp4,' result.csv
-            Xvfb :99 -screen 0 1400x900x24 &
+            # Detach Xvfb's output: a background process holding the ssh session's
+            # stdout would keep the step from ever finishing.
+            Xvfb :99 -screen 0 1400x900x24 > /dev/null 2>&1 < /dev/null &
+            xvfb=$!
             sleep 3
             export DISPLAY=:99
-            rust/target/release/chess-video-gui --smoke-test --renderer glow
-            rust/target/release/chess-video-gui --smoke-test --renderer glow --start --file test.mp4
+            timeout 300 rust/target/release/chess-video-gui --smoke-test --renderer glow
+            timeout 900 rust/target/release/chess-video-gui --smoke-test --renderer glow --start --file test.mp4
+            kill $xvfb
